@@ -24,6 +24,10 @@ vcfdf$QUAL <- ifelse(!is.na(vcfdf$QUAL), vcfdf$QUAL, vcfdf$PE + vcfdf$SR)
 
 assert_that(all(row.names(vcfdf) %in% vcfgr$vcfId))
 
+
+result$model <- list()
+result$caller <- caller
+
 plotPairs <- FALSE
 for (event in c("INS", "DEL", "DUP","INV")) {
 	subsetdf <- vcfdf %>%
@@ -41,6 +45,7 @@ for (event in c("INS", "DEL", "DUP","INV")) {
 		# create model
 		cv <- cv.glmnet(modeldf %>% dplyr::select(-tp) %>% as.matrix(), modeldf$tp, alpha=1, family='binomial')
 		pred <- predict(cv, newx=modeldf %>% dplyr::select(-tp) %>% as.matrix(), type="response", s="lambda.1se")
+		result$model[[event]] <- cv
 		# compare
 		plot <- ggplot() + aes(x=tp, y=precision) +
 			geom_line(data=toPrecRecall(subsetdf$QUAL, subsetdf$tp), aes(colour="caller")) +
@@ -48,11 +53,6 @@ for (event in c("INS", "DEL", "DUP","INV")) {
 		ggsave(plot=plot, filename=paste0("plots/", caller, "-roc-", event, ".png"), units="cm", height=29.7-2, width=21-2)
 	}
 }
-library(caret) #install.packages('caret', dependencies=TRUE)
-x <- as.matrix(trainingdf %>% select(-tp))
-y <- trainingdf$tp
-trc = trainControl(method="cv", number=10)
-fitM = train(x, y, trControl=trc, method="glmnet", family="binomial", metric="Accuracy")
 
 
 

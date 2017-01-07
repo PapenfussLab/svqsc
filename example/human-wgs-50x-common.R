@@ -53,7 +53,7 @@ eventType <- function(vcfgr) {
 				ifelse(vcfgr$insLen > vcfgr$svLen / 2, "INS", "DEL"))))
 	return(type)
 }
-toPrecRecall <- function(scores, tps, rocSlicePoints=100) {
+toPrecRecall <- function(scores, tps, rocSlicePoints=NULL) {
 	rocdf <- data.frame(QUAL=scores, tp=tps) %>%
 		dplyr::mutate(fp=!tp) %>%
 		dplyr::group_by(QUAL) %>%
@@ -65,14 +65,16 @@ toPrecRecall <- function(scores, tps, rocSlicePoints=100) {
 	#rocdf <- rocdf %>%
 	#	dplyr::mutate(recall=tp/max(tp))
 
-	# subsample along tp and tp+fp axis
-	rocdf <- rocdf %>%
-		dplyr::slice(unique(c(
-			1,
-			findInterval(seq(0, max(tp), max(tp)/rocSlicePoints), tp),
-			findInterval(seq(0, max(tp + fp), max(tp + fp)/rocSlicePoints), tp + fp),
-			n()
-		)))
+	if (!is.null(rocSlicePoints)) {
+		# subsample along tp and tp+fp axis
+		rocdf <- rocdf %>%
+			dplyr::slice(unique(c(
+				1,
+				findInterval(seq(0, max(tp), max(tp)/rocSlicePoints), tp),
+				findInterval(seq(0, max(tp + fp), max(tp + fp)/rocSlicePoints), tp + fp),
+				n()
+			)))
+	}
 	return(rocdf)
 }
 
