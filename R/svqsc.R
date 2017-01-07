@@ -1,7 +1,9 @@
 #' Generates a calibrated variant scoring model
 #'
-#' @param traininggr breakpoints used to train the model
-#' @param trainingdf annotation used for training
+#' @param vcfgr breakpoints used to train the model
+#' @param vcfdf INFO fields reported by the structural variant caller used make the structural variant calls
+#' @param modelTransform nrow-invariant function that takes vcfdf and returns
+#' only the columns to be used to generate the model. All columns must be numeric
 #' @param truthgr breakpoints considered true positives.
 #' @param requiredSupportingReads truthgr support count required to be called as a true positive.
 #' When comparing against a known truth call set, use 1.
@@ -11,124 +13,126 @@
 #' If FALSE, a variant is called as a true positive if all constituent breakpoints are supported by requiredSupportingReads in truthgr
 #' @return Variant scoring model for use in \code{\link{svqsc_score}}
 #' @export
-svqsc_train <- function(traininggr, trainingdf, truthgr, considerDuplicateCallsTrue=FALSE, requiredSupportingReads=1, allowsPartialHits=FALSE, ...) {
-	assert_that(!any(duplicated(names(trainingdf))))
-	truth <- .svqsc_matches_truth(traininggr, trainingdf, truthgr, considerDuplicateCallsTrue, requiredSupportingReads, allowsPartialHits, ...)
-	model <- .svqsc_generate_model(trainingdf, truth)
+svqsc_train <- function(vcfgr, vcfdf, modelTransform, truthgr, requiredSupportingReads=1, ...) {
+	vcfdf <- svqsc_annotate(vcfgr, vcfdf)
+	vcfdf <- .svqsc_annotate_tp(vcfgr, vcfdf, truthgr, countOnlyBest, requiredSupportingReads, allowsPartialHits, ...)
+	modeldf <- modelTransform(modeldf)
+	modeldf$tp <- vcfdf$tp
+	modeldf$eventType <- vcfdf$eventType
+
+	model <- .svqsc_generate_model(modeldf, vcfdf, ...)
+	model$transform <- modelTransform
 	return(model)
 }
-#' Convert the annotation data frame to a matrix
-#' TODO: how do we generically handle non-numeric values? Do we just drop them?
-.svqsc_df2matrix <- function(df) {
-	glmmat <- as.matrix(df)
-	#assert_that(!any(is.na(glmmat)))
-	# Missing values default to zero
-	glmmat[is.na(glmmat)] <- 0
-	#matrix(as.numeric(unlist(df)),nrow=nrow(df))
-	#colnames(glmmat) <- names(df)
-	return(glmmat)
+svqsc_generate_plots <- function(vcfgr, vcfdf, model, truthgr, requiredSupportingReads=1, ...) {
+	pred <- svqsc_predict(vcfgr, vcfdf, model)
+	vcfdf <- svqsc_annotate(vcfgr, vcfdf)
+	vcfdf <- .svqsc_annotate_tp(vcfgr, vcfdf, truthgr, countOnlyBest, requiredSupportingReads, allowsPartialHits, ...)
+	modeldf <- modelTransform(modeldf)
+	modeldf$tp <- vcfdf$tp
+	modeldf$eventType <- vcfdf$eventType
+	plots <- list()
+	for (event in .eventTypes) {
+		eventmodeldf <- modeldf %>%
+			dplyr::filter(eventType==event)
+			dplyr::select(-eventType)
+		plots[[event]] <- list()
+		plots[[event]]$pairs <- ggpairs(eventmodeldf %>% mutate(tp=ifelse(tp, "TP", "FP")), columns=2:length(eventmodeldf), mapping=ggplot2::aes(colour=tp, alpha=0.2))
+		plots[[event]]$precision_recall <- ggplot() + aes(x=tp, y=precision) +
+			# QUAL score is not necessarily in the model so we need to pull it from vcfdf
+			geom_line(data=.toPrecRecall(vcfdf$QUAL[vcfdf$eventType==event], eventmodeldf$tp), aes(colour="caller"))
+			geom_line(data=.toPrecRecall(pred, eventmodeldf$tp), aes(colour="model"))
+	}
+	return(plots)
 }
-#' generates a calibrated model from a numeric data frame with a tp field
-.svqsc_generate_model <- function(trainingdf, truth) {
-	assert_that(nrow(trainingdf) == length(truth))
-	# subset so tp and fp sets are of similar size
-	trainingdf$tp <- truth
-	subsetdf <- rbind(
-		trainingdf %>% filter(tp),
-		trainingdf %>% filter(!tp) %>% sample_n(max(100,sum(trainingdf$tp))))
-
-	glmmat <- .svqsc_df2matrix(subsetdf %>% select(-tp))
-	glmmod <- glmnet::cv.glmnet(glmmat, y=subsetdf$tp, alpha=1, family='binomial')
-	# TODO: is this calibrated?
-	return (glmmod)
+.svqsc_annotate_tp <- function(vcfgr, vcfdf, truthgr, requiredSupportingReads, ...) {
+	hitscounts <- countBreakpointOverlaps(vcfgr, truthgr, ...)
+	if (allowsPartialHits) {
+		hitdf <- data.frame(name=names(vcfgr), hitscounts=hitscounts) %>%
+			dplyr::group_by(name) %>%
+			dplyr::summarise(hitscounts=sum(hitscounts)) %>%
+			dplyr::mutate(tp=hitscounts >= requiredSupportingReads) %>%
+			dplyr::filter(tp)
+	} else {
+		hitdf <- data.frame(name=names(vcfgr), hitscounts=hitscounts,
+			tp=hitscounts >= requiredSupportingReads) %>%
+			dplyr::group_by(name) %>%
+			dplyr::summarise(tp=all(tp), hitscounts=sum(hitscounts)) %>%
+			dplyr::filter(tp)
+	}
+	vcfdf$tp <- FALSE
+	vcfdf[vcfgr[hitdf$name]$vcfId,]$tp <- TRUE
+	return(vcfdf)
 }
-#' Score the given variants according to the given model
-#' @param df breakpoint annotations
+.svqsc_generate_model <- function(modeldf, vcfdf) {
+	assert_that(all(c("eventType", "tp") %in% names(modeldf)))
+	# Generate a different model for each event type
+	model <- list()
+	for (event in .eventTypes) {
+		eventmodeldf <- modeldf %>% dplyr::filter(eventType==event)
+		if (nrow(eventmodeldf) > 0) {
+			cv <- cv.glmnet(eventmodeldf %>% dplyr::select(-tp) %>% as.matrix(), eventmodeldf$tp, alpha=1, family='binomial')
+			# TODO: calibrate model probabilities
+			model[[event]] <- cv
+		}
+	}
+	return(model)
+}
+svqsc_annotate <- function(vcfgr, vcfdf) {
+	assert_that(all(row.names(vcfdf) %in% vcfgr$vcfId))
+	vcfdf$svLen <- 0
+	vcfdf[vcfgr$vcfId,]$svLen <- abs(vcfgr$svLen) + abs(vcfgr$insLen)
+	vcfdf$eventType <- NA_character_
+	vcfdf[vcfgr$vcfId,]$eventType <- .eventType(vcfgr)
+	vcfdf$QUAL <- NA_real_
+	vcfdf[vcfgr$vcfId,]$QUAL <- vcfgr$QUAL
+}
+.eventTypes <- c("INS", "DEL", "DUP","INV", "XCHR")
+.eventType <- function(vcfgr) {
+	p <- partner(vcfgr)
+	type <- ifelse(seqnames(vcfgr) != seqnames(p), "XCHR",
+		ifelse(strand(vcfgr) == strand(p), "INV",
+			ifelse((strand(vcfgr) == "+" & start(vcfgr) > start(p)) | (strand(p) == "+" & start(p) > start(vcfgr)), "DUP",
+				ifelse(vcfgr$insLen > vcfgr$svLen / 2, "INS", "DEL"))))
+	return(type)
+}
+#' Score the given variants according to the trained model
 #' @param model scoring model generated from \code{\link{svqsc_train}}
-svqsc_score <- function(model, df) {
-	pred <- 1 - predict(model, newx=as.matrix(df), type="response", s="lambda.1se")
-	phredpred <- -10*log10(pred)
-	return(phredpred)
+svqsc_predict <- function(vcfgr, vcfdf, model) {
+	modeldf <- model$transform(vcfdf)
+	modeldf <- svqsc_annotate(vcfgr, modeldf)
+	modeldf$prediction <- rep(NA_real_, length(vcfgr))
+	for (event in .eventTypes) {
+		if (!is.null(model[[event]])) {
+			eventmodeldf <- modeldf[modeldf$eventType==event,]
+			pred <- predict(model[[event]], newx=eventmodeldf %>% as.matrix(), type="response", s="lambda.1se")[,1]
+			modeldf[modeldf$eventType==event]$prediction <- pred
+		}
+	}
+	return(modeldf$prediction)
 }
-
-#' Generates a precision recall plot for QUAL, and for the model
-.svqsc_precision_recall <- function(vcf, truthgr, dftransform, requiredSupportingReads, considerDuplicateCallsTrue=FALSE, allowsPartialHits=FALSE, intrachromosomalOnly=TRUE) {
-	# filters: 50bp
-	vcf <- vcf[is.na(StructuralVariantAnnotation:::.svLen(vcf)) | abs(StructuralVariantAnnotation:::.svLen(vcf)) >= minsize,]
-	gr <- breakpointRanges(vcf)
-	if (intrachromosomalOnly) {
-		intravcfids <- gr$vcfId[as.logical(seqnames(gr) == seqnames(partner(gr)))]
-		intravcfids <- intravcfids[!duplicated(intravcfids)]
-		vcf <- vcf[intravcfids,]
-		gr <- breakpointRanges(vcf)
-	}
-	if (any(is.na(gr$QUAL))) {
-		stop("Missing QUAL score for at least one breakpoint")
-	}
-	df <- StructuralVariantAnnotation::unpack(vcf)
-	df$QUAL <- 0
-	df[gr$vcfId,]$QUAL <- gr$QUAL
-	dfQUAL <- df$QUAL
-	df <- dftransform(df, gr)
-	truth <- .svqsc_matches_truth(gr, df, truthgr, considerDuplicateCallsTrue, requiredSupportingReads, allowsPartialHits, maxgap=maxgap, ignore.strand=ignore.strand)
-	model <- svqsc_train(gr, df, truthgr, maxgap=maxgap, ignore.strand=ignore.strand, requiredSupportingReads)
-	modelpred <- svqsc_score(model, df)
-	#pred <- df %>%
-	#	dplyr::mutate(estimator="QUAL") %>%
-	#	dplyr::select(estimator, QUAL, tp) %>%
-	#	rbind(data.frame(
-	#		estimator=rep(colnames(allpred), each=nrow(allpred)),
-	#		QUAL=as.vector(allpred),
-	#		tp=rep(df$tp, times=ncol(allpred))))
-	qual_score <- data.frame(estimator="QUAL", QUAL=dfQUAL, tp=truth)
-	svqsc_score <- data.frame(estimator="lambda.1se", QUAL=unname(modelpred), tp=truth)
-	pred <- rbind(qual_score, svqsc_score)
-	roc <- pred %>%
-		dplyr::group_by(estimator) %>%
-		dplyr::arrange(desc(QUAL)) %>%
+.toPrecRecall <- function(scores, tps, rocSlicePoints=NULL) {
+	rocdf <- data.frame(QUAL=scores, tp=tps) %>%
 		dplyr::mutate(fp=!tp) %>%
+		dplyr::group_by(QUAL) %>%
+		dplyr::summarise(tp=sum(tp), fp=sum(fp)) %>%
+		dplyr::arrange(dplyr::desc(QUAL)) %>%
 		dplyr::mutate(tp=cumsum(tp), fp=cumsum(fp)) %>%
-		dplyr::group_by(estimator, QUAL) %>%
-		dplyr::summarise(tp=max(tp), fp=max(fp)) %>%
-		dplyr::ungroup() %>%
-		dplyr::mutate(precision=tp / (tp + fp), n=tp + fp)
+		dplyr::mutate(precision=tp/(tp+fp), fdr=1-precision)
+	# calculate area under precision-recall curve
+	#rocdf <- rocdf %>%
+	#	dplyr::mutate(recall=tp/max(tp))
 
-	roc <- roc %>%
-	  dplyr::group_by(estimator) %>%
-	  dplyr::arrange(n) %>%
-	  dplyr::filter(
-	    # keep start/end
-	    is.na(dplyr::lag(tp)) | is.na(dplyr::lead(tp)) |
-	      # keep group transitions (TODO: is there a way to make lead/lag across group_by return NA?)
-	      estimator != dplyr::lag(estimator) |
-	      estimator != dplyr::lead(estimator) |
-	      # slopes not equal dx1/dy1 != dx2/dy2 -> dx1*dy2 != dx2*dy1
-	      (tp - dplyr::lag(tp))*(dplyr::lead(fp) - dplyr::lag(fp)) != (dplyr::lead(tp) - dplyr::lag(tp))*(fp - dplyr::lag(fp)) |
-	      # less than 10 calls wide
-	      dplyr::lead(tp) - dplyr::lag(tp) > 10 |
-	      # keep every 5th row
-	      row_number() %% 10 == 0)
-	# lossy removal of points with least change (shinyCache.R)
-	for (k in c(4, 16, 32, 64)) {
-		roc <- roc %>%
-			dplyr::group_by(estimator) %>%
-			dplyr::arrange(n) %>%
-			dplyr::filter(
-				is.na(dplyr::lag(tp)) | is.na(dplyr::lead(tp)) |
-				estimator != dplyr::lag(estimator) |
-				estimator != dplyr::lead(estimator) |
-				# remove points with least amount of change
-				dplyr::lead(tp) - dplyr::lag(tp) + dplyr::lead(fp) - dplyr::lag(fp) > k |
-				# keep every 5th to prevent removal of large segments
-				row_number() %% 5 == 0
-			) %>%
-			dplyr::ungroup()
+	if (!is.null(rocSlicePoints)) {
+		# subsample along tp and tp+fp axis
+		rocdf <- rocdf %>%
+			dplyr::slice(unique(c(
+				1,
+				findInterval(seq(0, max(tp), max(tp)/rocSlicePoints), tp),
+				findInterval(seq(0, max(tp + fp), max(tp + fp)/rocSlicePoints), tp + fp),
+				n()
+			)))
 	}
-	precisionRecallPlot <- ggplot(roc) +
-		aes(y=precision, x=tp, color=estimator) +
-		geom_line() +
-		geom_line(data=roc %>% filter(estimator=="QUAL"), size=2)
-	return(list(model=model, roc=roc, precisionRecallPlot=precisionRecallPlot))
+	return(rocdf)
 }
-
 

@@ -45,14 +45,6 @@ addEncodeDacColumn <- function(vcfdf, vcfgr, ...) {
 	vcfdf$EncodeDac <- eventOverlaps(wgEncodeDacMapabilityConsensusExcludable, vcfdf, vcfgr, ...)
 	return(vcfdf)
 }
-eventType <- function(vcfgr) {
-	p <- partner(vcfgr)
-	type <- ifelse(seqnames(vcfgr) != seqnames(p), "ITX",
-		ifelse(strand(vcfgr) == strand(p), "INV",
-			ifelse((strand(vcfgr) == "+" & start(vcfgr) > start(p)) | (strand(p) == "+" & start(p) > start(vcfgr)), "DUP",
-				ifelse(vcfgr$insLen > vcfgr$svLen / 2, "INS", "DEL"))))
-	return(type)
-}
 toPrecRecall <- function(scores, tps, rocSlicePoints=NULL) {
 	rocdf <- data.frame(QUAL=scores, tp=tps) %>%
 		dplyr::mutate(fp=!tp) %>%
@@ -87,6 +79,8 @@ maxgap <- 200 # add error margin for imprecise callers such as breakdancer
 ignore.strand <- TRUE # breakdancer does not report direction so this needs to be ignored
 sizemargin <- 0.25 # allow +-25% event size
 countOnlyBest <- TRUE # consider duplicate variant calls as false
+considerDuplicateCallsTrue <- FALSE
+allowsPartialHits <- FALSE
 if (!exists("wgEncodeDacMapabilityConsensusExcludable")) {
 	# use the ENCODE DAC blacklist to filter problematic regions
 	wgEncodeDacMapabilityConsensusExcludable <- import("C:/dev/sv_benchmark/input.na12878/wgEncodeDacMapabilityConsensusExcludable.bed")
@@ -95,6 +89,7 @@ if (!exists("wgEncodeDacMapabilityConsensusExcludable")) {
 #truthgr <- bedpe2breakpointgr("C:/dev/sv_benchmark/input.na12878/lumpy-Mills2012-call-set.bedpe")
 if (!exists("truthgr")) {
 	requiredSupportingReads <- 5 # require at least 5 long reads
+	truthsample <- "na12878.moleculo"
 	truthgr <- bedpe2breakpointgr("C:/dev/input.na12878/longread/moleculo/NA12878.moleculo.clean.bedpe.gz")
 	#truthgr <- bedpe2breakpointgr("C:/dev/input.na12878/longread/pacbio/NA12878.pacbio_fr_MountSinai.bwa-sw.20140211.bam.noid.sv.bedpe.gz")
 	seqlevelsStyle(truthgr) <- "UCSC"
