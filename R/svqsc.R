@@ -1,9 +1,25 @@
+#' @export
+svqsc_annotate_QUAL <- function(inputvcffile, model, outputvcffile) {
+	# load VCF
+	# save original QUAL scores to INFO field svqsc OQ
+		# add new INFO to header
+		# write QUAL
+	# apply model
+	# write new QUAL scores to VCF
+	# write new VCF
+}
+
 #' Generates a calibrated variant scoring model
+#'
+#' Separate models are used for insertions, deletions, inversions, tandem duplications
+#' and inter-chromosomal events as the event signatures for these events can differ
+#' significantly.
 #'
 #' @param vcfgr breakpoints used to train the model
 #' @param vcfdf INFO fields reported by the structural variant caller used make the structural variant calls
 #' @param modelTransform nrow-invariant function that takes vcfdf and returns
-#' only the columns to be used to generate the model. All columns must be numeric
+#' only the columns to be used to generate the model. All columns must be numeric.
+#' The following additional fields are also available: svLen
 #' @param truthgr breakpoints considered true positives.
 #' @param requiredSupportingReads truthgr support count required to be called as a true positive.
 #' When comparing against a known truth call set, use 1.
