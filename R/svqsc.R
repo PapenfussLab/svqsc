@@ -1,5 +1,5 @@
-#' @export
-svqsc_annotate_QUAL <- function(inputvcffile, model, outputvcffile) {
+#@export
+#svqsc_annotate_QUAL <- function(inputvcffile, model, outputvcffile) {
 	# load VCF
 	# save original QUAL scores to INFO field svqsc OQ
 		# add new INFO to header
@@ -7,7 +7,7 @@ svqsc_annotate_QUAL <- function(inputvcffile, model, outputvcffile) {
 	# apply model
 	# write new QUAL scores to VCF
 	# write new VCF
-}
+#}
 
 #' Generates a calibrated variant scoring model
 #'
@@ -29,40 +29,55 @@ svqsc_annotate_QUAL <- function(inputvcffile, model, outputvcffile) {
 #' If FALSE, a variant is called as a true positive if all constituent breakpoints are supported by requiredSupportingReads in truthgr
 #' @return Variant scoring model for use in \code{\link{svqsc_score}}
 #' @export
-svqsc_train <- function(vcfgr, vcfdf, modelTransform, truthgr, requiredSupportingReads=1, ...) {
+svqsc_train <- function(vcfgr, vcfdf, modelTransform, truthgr,
+		countOnlyBest=TRUE,
+		requiredSupportingReads=1, allowsPartialHits=FALSE,
+		maxgap = 0L, minoverlap = 1L, ignore.strand = FALSE,
+		sizemargin = 0.25, restrictMarginToSizeMultiple = 0.5) {
 	vcfdf <- svqsc_annotate(vcfgr, vcfdf)
-	vcfdf <- .svqsc_annotate_tp(vcfgr, vcfdf, truthgr, countOnlyBest, requiredSupportingReads, allowsPartialHits, ...)
-	modeldf <- modelTransform(modeldf)
+	vcfdf <- .svqsc_annotate_tp(vcfgr, vcfdf, truthgr, countOnlyBest=countOnlyBest, requiredSupportingReads=requiredSupportingReads, allowsPartialHits=allowsPartialHits, maxgap=maxgap, minoverlap=minoverlap, ignore.strand=ignore.strand, sizemargin=sizemargin, restrictMarginToSizeMultiple=restrictMarginToSizeMultiple)
+	modeldf <- modelTransform(vcfdf)
 	modeldf$tp <- vcfdf$tp
 	modeldf$eventType <- vcfdf$eventType
 
-	model <- .svqsc_generate_model(modeldf, vcfdf, ...)
+	model <- .svqsc_generate_model(modeldf, vcfdf)
 	model$transform <- modelTransform
 	return(model)
 }
-svqsc_generate_plots <- function(vcfgr, vcfdf, model, truthgr, requiredSupportingReads=1, ...) {
+svqsc_generate_plots <- function(vcfgr, vcfdf, model, truthgr,
+		countOnlyBest=TRUE,
+		requiredSupportingReads=1, allowsPartialHits=FALSE,
+		maxgap = 0L, minoverlap = 1L, ignore.strand = FALSE,
+		sizemargin = 0.25, restrictMarginToSizeMultiple = 0.5) {
 	pred <- svqsc_predict(vcfgr, vcfdf, model)
 	vcfdf <- svqsc_annotate(vcfgr, vcfdf)
-	vcfdf <- .svqsc_annotate_tp(vcfgr, vcfdf, truthgr, countOnlyBest, requiredSupportingReads, allowsPartialHits, ...)
-	modeldf <- modelTransform(modeldf)
-	modeldf$tp <- vcfdf$tp
+	vcfdf <- .svqsc_annotate_tp(vcfgr, vcfdf, truthgr, countOnlyBest=countOnlyBest, requiredSupportingReads=requiredSupportingReads, allowsPartialHits=allowsPartialHits, maxgap=maxgap, minoverlap=minoverlap, ignore.strand=ignore.strand, sizemargin=sizemargin, restrictMarginToSizeMultiple=restrictMarginToSizeMultiple)
+	modeldf <- modelTransform(vcfdf)
 	modeldf$eventType <- vcfdf$eventType
+	modeldf$tp <- vcfdf$tp
 	plots <- list()
 	for (event in .eventTypes) {
 		eventmodeldf <- modeldf %>%
-			dplyr::filter(eventType==event)
+			dplyr::filter(eventType==event) %>%
 			dplyr::select(-eventType)
 		plots[[event]] <- list()
-		plots[[event]]$pairs <- ggpairs(eventmodeldf %>% mutate(tp=ifelse(tp, "TP", "FP")), columns=2:length(eventmodeldf), mapping=ggplot2::aes(colour=tp, alpha=0.2))
+		plots[[event]]$pairs <- ggpairs(eventmodeldf %>% mutate(tp=ifelse(tp, "TP", "FP")), columns=1:length(eventmodeldf-2), mapping=ggplot2::aes(colour=tp, alpha=0.2))
+		if (is.null(vcfdf$QUAL)) {
+			stop("No QUAL in data frame. Please add a QUAL field to the caller data frame.")
+		}
 		plots[[event]]$precision_recall <- ggplot() + aes(x=tp, y=precision) +
 			# QUAL score is not necessarily in the model so we need to pull it from vcfdf
-			geom_line(data=.toPrecRecall(vcfdf$QUAL[vcfdf$eventType==event], eventmodeldf$tp), aes(colour="caller"))
-			geom_line(data=.toPrecRecall(pred, eventmodeldf$tp), aes(colour="model"))
+			geom_line(data=.toPrecRecall(vcfdf$QUAL[vcfdf$eventType==event], eventmodeldf$tp), aes(colour="caller")) +
+			geom_line(data=.toPrecRecall(pred[vcfdf$eventType==event], eventmodeldf$tp), aes(colour="model"))
+		#ggsave(paste0(event, ".png"))
 	}
 	return(plots)
 }
-.svqsc_annotate_tp <- function(vcfgr, vcfdf, truthgr, requiredSupportingReads, ...) {
-	hitscounts <- countBreakpointOverlaps(vcfgr, truthgr, ...)
+.svqsc_annotate_tp <- function(vcfgr, vcfdf, truthgr,
+		countOnlyBest, requiredSupportingReads, allowsPartialHits,
+		maxgap, minoverlap, ignore.strand,
+		sizemargin, restrictMarginToSizeMultiple) {
+	hitscounts <- countBreakpointOverlaps(vcfgr, truthgr, countOnlyBest=countOnlyBest, maxgap=maxgap, minoverlap=minoverlap, ignore.strand=ignore.strand, sizemargin=sizemargin, restrictMarginToSizeMultiple=restrictMarginToSizeMultiple)
 	if (allowsPartialHits) {
 		hitdf <- data.frame(name=names(vcfgr), hitscounts=hitscounts) %>%
 			dplyr::group_by(name) %>%
@@ -85,7 +100,9 @@ svqsc_generate_plots <- function(vcfgr, vcfdf, model, truthgr, requiredSupportin
 	# Generate a different model for each event type
 	model <- list()
 	for (event in .eventTypes) {
-		eventmodeldf <- modeldf %>% dplyr::filter(eventType==event)
+		eventmodeldf <- modeldf %>%
+			dplyr::filter(eventType==event) %>%
+			dplyr::select(-eventType)
 		if (nrow(eventmodeldf) > 0) {
 			cv <- cv.glmnet(eventmodeldf %>% dplyr::select(-tp) %>% as.matrix(), eventmodeldf$tp, alpha=1, family='binomial')
 			# TODO: calibrate model probabilities
@@ -100,8 +117,11 @@ svqsc_annotate <- function(vcfgr, vcfdf) {
 	vcfdf[vcfgr$vcfId,]$svLen <- abs(vcfgr$svLen) + abs(vcfgr$insLen)
 	vcfdf$eventType <- NA_character_
 	vcfdf[vcfgr$vcfId,]$eventType <- .eventType(vcfgr)
-	vcfdf$QUAL <- NA_real_
-	vcfdf[vcfgr$vcfId,]$QUAL <- vcfgr$QUAL
+	if (!("QUAL" %in% names(vcfdf))) {
+		vcfdf$QUAL <- NA_real_
+		vcfdf[vcfgr$vcfId,]$QUAL <- vcfgr$QUAL
+	}
+	return(vcfdf)
 }
 .eventTypes <- c("INS", "DEL", "DUP","INV", "XCHR")
 .eventType <- function(vcfgr) {
@@ -115,14 +135,18 @@ svqsc_annotate <- function(vcfgr, vcfdf) {
 #' Score the given variants according to the trained model
 #' @param model scoring model generated from \code{\link{svqsc_train}}
 svqsc_predict <- function(vcfgr, vcfdf, model) {
+	vcfdf <- svqsc_annotate(vcfgr, vcfdf)
 	modeldf <- model$transform(vcfdf)
-	modeldf <- svqsc_annotate(vcfgr, modeldf)
-	modeldf$prediction <- rep(NA_real_, length(vcfgr))
+	modeldf$prediction <- rep(NA_real_, nrow(modeldf))
+	modeldf$eventType <- vcfdf$eventType
 	for (event in .eventTypes) {
-		if (!is.null(model[[event]])) {
-			eventmodeldf <- modeldf[modeldf$eventType==event,]
-			pred <- predict(model[[event]], newx=eventmodeldf %>% as.matrix(), type="response", s="lambda.1se")[,1]
-			modeldf[modeldf$eventType==event]$prediction <- pred
+		cv <- model[[event]]
+		if (!is.null(cv)) {
+			eventmodeldf <- modeldf %>%
+				dplyr::filter(eventType==event) %>%
+				dplyr::select(-eventType, -prediction)
+			pred <- predict(cv, newx=eventmodeldf %>% as.matrix(), type="response", s="lambda.1se")[,1]
+			modeldf[modeldf$eventType==event,]$prediction <- pred
 		}
 	}
 	return(modeldf$prediction)

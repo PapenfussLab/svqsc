@@ -1,3 +1,12 @@
+library(devtools)
+#install_github("d-cameron/StructuralVariantAnnotation")
+#install_github("d-cameron/svqsc")
+library(dplyr)
+library(ggplot2)
+library(GGally)
+library(StructuralVariantAnnotation)
+library(assertthat)
+library(R.cache)
 
 filterCalls <- function(gr, ignore.altContigs, ignore.interchromosomal, mineventsize, maxeventsize, blacklistgr) {
 	if (ignore.altContigs) {
@@ -33,12 +42,17 @@ load.svcalls <- function(caller, sample, ignore.altContigs, ignore.interchromoso
 	result <- list()
 	result$caller <- caller
 	result$sample <- sample
-	result$vcf <- load.filtered.vcf("C:/dev/svqsc.data/", sample, "/", caller, ".vcf.gz", ignore.altContigs, ignore.interchromosomal, mineventsize, maxeventsize, blacklistgr)
+	filename <- paste0(datadir, "/", sample, "/", caller, ".vcf.gz")
+	result$vcf <- load.filtered.vcf(filename, ignore.altContigs, ignore.interchromosomal, mineventsize, maxeventsize, blacklistgr)
+	if (nrow(result$vcf) == 0) {
+		stop(paste("No VCF records in ", filename))
+	}
 	result$vcfgr <- breakpointRanges(result$vcf)
 	seqlevelsStyle(result$vcfgr) <- "UCSC"
 	result$vcfgr <- filterCalls(result$vcfgr, ignore.altContigs, ignore.interchromosomal, mineventsize, maxeventsize, blacklistgr)
 	result$vcfdf <- unpack(result$vcf)
 	result$vcfdf <- result$vcfdf[row.names(result$vcfdf) %in% result$vcfgr$vcfId,]
+	return(result)
 }
 load.filtered.vcf <- function(file, ignore.altContigs, ignore.interchromosomal, mineventsize, maxeventsize, blacklistgr) {
 	vcf <- readVcf(file, "hg19")
@@ -50,7 +64,7 @@ load.filtered.vcf <- function(file, ignore.altContigs, ignore.interchromosomal, 
 		mineventsize,
 		maxeventsize,
 		blacklistgr)
-	vcf <- vcf[unique(gr$EVENT),]
+	vcf <- vcf[unique(gr$vcfId),]
 	return(vcf)
 }
 load.filtered.bedpe <- function(file, ignore.altContigs, ignore.interchromosomal, mineventsize, maxeventsize, blacklistgr) {
@@ -71,17 +85,19 @@ load.bed <- function(file) {
 }
 # R.cache memoization
 memoized.load.filtered.vcf <- addMemoization(load.filtered.vcf)
-memoized.load.filtered.bedpe <- addMemoization(load.bed)
+memoized.load.filtered.bedpe <- addMemoization(load.filtered.bedpe)
 memoized.load.bed <- addMemoization(load.bed)
 memoized.load.svcalls <- addMemoization(load.svcalls)
 
-generate.plots <- function(outputdir="plots", testdfgr, model, truthgr, requiredSupportingReads, maxgap, ignore.strand, sizemargin, countOnlyBest, considerDuplicateCallsTrue, allowsPartialHits) {
-	plots <- svqsc_generate_plots(testdfgr$vcfgr, testdfgr$vcfdf, model, truthgr[[train$sample]], requiredSupportingReads, maxgap, ignore.strand, sizemargin, countOnlyBest, considerDuplicateCallsTrue, allowsPartialHits)
-	suppressWarnings(dir.create(outputdir))
+generate.plots <- function(outputdir, testdfgr, model, truthgr, requiredSupportingReads, maxgap, ignore.strand, sizemargin, countOnlyBest, allowsPartialHits) {
+	plots <- svqsc_generate_plots(testdfgr$vcfgr, testdfgr$vcfdf, model, truthgr, requiredSupportingReads=requiredSupportingReads, maxgap=maxgap, ignore.strand=ignore.strand, sizemargin=sizemargin, countOnlyBest=countOnlyBest, allowsPartialHits=allowsPartialHits)
 	for (event in names(model)) {
-		prefix <- paste0(outputdir, "/", testdfgr$sample, "-", testdfgr$model_sample,  "-", train$caller, "-", train$event, "-")
-		ggsave(plot=plots[[event]]$pairs, filename=paste0(prefix, event, "-pairs.png"), units="cm", height=29.7-2, width=21-2)
-		ggsave(plot=plots[[event]]$precision_recall, paste0(prefix, event, "-precision_recall.png"), units="cm", height=29.7-2, width=21-2)
+		if (event %in% .eventTypes) {
+			prefix <- paste0(outputdir, "/", testdfgr$sample, "-", testdfgr$caller, "-", event, "-")
+			ggsave(plot=plots[[event]]$pairs, filename=paste0(prefix, "pairs.png"), units="cm", height=29.7-2, width=21-2)
+			ggsave(plot=plots[[event]]$precision_recall, paste0(prefix, "precision_recall-", model$name,".png"), units="cm", height=29.7-2, width=21-2)
+		}
 	}
 }
+
 
