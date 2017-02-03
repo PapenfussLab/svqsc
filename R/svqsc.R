@@ -35,7 +35,7 @@ svqsc_train <- function(vcfgr, vcfdf, modelTransform, truthgr,
 		maxgap = 0L, minoverlap = 1L, ignore.strand = FALSE,
 		sizemargin = 0.25, restrictMarginToSizeMultiple = 0.5) {
 	vcfdf <- svqsc_annotate(vcfgr, vcfdf)
-	vcfdf <- .svqsc_annotate_tp(vcfgr, vcfdf, truthgr, countOnlyBest=countOnlyBest, requiredSupportingReads=requiredSupportingReads, allowsPartialHits=allowsPartialHits, maxgap=maxgap, minoverlap=minoverlap, ignore.strand=ignore.strand, sizemargin=sizemargin, restrictMarginToSizeMultiple=restrictMarginToSizeMultiple)
+	vcfdf <- svqsc_annotate_truth(vcfgr, vcfdf, truthgr, countOnlyBest=countOnlyBest, requiredSupportingReads=requiredSupportingReads, allowsPartialHits=allowsPartialHits, maxgap=maxgap, minoverlap=minoverlap, ignore.strand=ignore.strand, sizemargin=sizemargin, restrictMarginToSizeMultiple=restrictMarginToSizeMultiple)
 	modeldf <- modelTransform(vcfdf)
 	modeldf$tp <- vcfdf$tp
 	modeldf$eventType <- vcfdf$eventType
@@ -44,36 +44,32 @@ svqsc_train <- function(vcfgr, vcfdf, modelTransform, truthgr,
 	model$transform <- modelTransform
 	return(model)
 }
-svqsc_generate_plots <- function(vcfgr, vcfdf, model, truthgr,
+svqsc_evaluate_model <- function(vcfgr, vcfdf, model, truthgr,
 		countOnlyBest=TRUE,
 		requiredSupportingReads=1, allowsPartialHits=FALSE,
 		maxgap = 0L, minoverlap = 1L, ignore.strand = FALSE,
 		sizemargin = 0.25, restrictMarginToSizeMultiple = 0.5) {
-	pred <- svqsc_predict(vcfgr, vcfdf, model)
+  pred <- svqsc_predict(vcfgr, vcfdf, model)
 	vcfdf <- svqsc_annotate(vcfgr, vcfdf)
-	vcfdf <- .svqsc_annotate_tp(vcfgr, vcfdf, truthgr, countOnlyBest=countOnlyBest, requiredSupportingReads=requiredSupportingReads, allowsPartialHits=allowsPartialHits, maxgap=maxgap, minoverlap=minoverlap, ignore.strand=ignore.strand, sizemargin=sizemargin, restrictMarginToSizeMultiple=restrictMarginToSizeMultiple)
-	modeldf <- modelTransform(vcfdf)
+	vcfdf <- svqsc_annotate_truth(vcfgr, vcfdf, truthgr, countOnlyBest=countOnlyBest, requiredSupportingReads=requiredSupportingReads, allowsPartialHits=allowsPartialHits, maxgap=maxgap, minoverlap=minoverlap, ignore.strand=ignore.strand, sizemargin=sizemargin, restrictMarginToSizeMultiple=restrictMarginToSizeMultiple)
+	modeldf <- model$transform(vcfdf)
 	modeldf$eventType <- vcfdf$eventType
 	modeldf$tp <- vcfdf$tp
-	plots <- list()
+	modeldf$prediction <- pred
+	modeldf$QUAL <- vcfdf$QUAL
+	result <- list()
 	for (event in .eventTypes) {
-		eventmodeldf <- modeldf %>%
-			dplyr::filter(eventType==event) %>%
-			dplyr::select(-eventType)
-		plots[[event]] <- list()
-		plots[[event]]$pairs <- ggpairs(eventmodeldf %>% mutate(tp=ifelse(tp, "TP", "FP")), columns=1:length(eventmodeldf-2), mapping=ggplot2::aes(colour=tp, alpha=0.2))
-		if (is.null(vcfdf$QUAL)) {
-			stop("No QUAL in data frame. Please add a QUAL field to the caller data frame.")
-		}
-		plots[[event]]$precision_recall <- ggplot() + aes(x=tp, y=precision) +
-			# QUAL score is not necessarily in the model so we need to pull it from vcfdf
-			geom_line(data=.toPrecRecall(vcfdf$QUAL[vcfdf$eventType==event], eventmodeldf$tp), aes(colour="caller")) +
-			geom_line(data=.toPrecRecall(pred[vcfdf$eventType==event], eventmodeldf$tp), aes(colour="model"))
-		#ggsave(paste0(event, ".png"))
+	  eventmodeldf <- modeldf %>% filter(eventType==event)
+		result[[event]] <- list()
+		precRecallModel <- .toPrecRecall(pred[vcfdf$eventType==event], eventmodeldf$tp)
+		result[[event]]$precision_recall <- precRecallModel
+		result[[event]]$precision_recall_auc <- .precRecallAUC(precRecallModel)
 	}
-	return(plots)
+	result$model <- model
+	result$modeldf <- modeldf
+	return(result)
 }
-.svqsc_annotate_tp <- function(vcfgr, vcfdf, truthgr,
+svqsc_annotate_truth <- function(vcfgr, vcfdf, truthgr,
 		countOnlyBest, requiredSupportingReads, allowsPartialHits,
 		maxgap, minoverlap, ignore.strand,
 		sizemargin, restrictMarginToSizeMultiple) {
@@ -95,7 +91,9 @@ svqsc_generate_plots <- function(vcfgr, vcfdf, model, truthgr,
 	vcfdf[vcfgr[hitdf$name]$vcfId,]$tp <- TRUE
 	return(vcfdf)
 }
-.svqsc_generate_model <- function(modeldf, vcfdf) {
+#'
+#' @param minevents Minimum number of true/false events for a model to be trained
+.svqsc_generate_model <- function(modeldf, vcfdf, minevents=16) {
 	assert_that(all(c("eventType", "tp") %in% names(modeldf)))
 	# Generate a different model for each event type
 	model <- list()
@@ -103,10 +101,14 @@ svqsc_generate_plots <- function(vcfgr, vcfdf, model, truthgr,
 		eventmodeldf <- modeldf %>%
 			dplyr::filter(eventType==event) %>%
 			dplyr::select(-eventType)
-		if (nrow(eventmodeldf) > 0) {
-			cv <- cv.glmnet(eventmodeldf %>% dplyr::select(-tp) %>% as.matrix(), eventmodeldf$tp, alpha=1, family='binomial')
+		# need a minimum number of true and false events to be able to train the model
+		if (all(c(sum(eventmodeldf$tp), sum(!eventmodeldf$tp)) >= minevents)) {
+			write(paste("Training", event), stderr())
+			cv <- cv.glmnet(model.matrix(~., eventmodeldf %>% dplyr::select(-tp)), eventmodeldf$tp, alpha=1, family='binomial')
 			# TODO: calibrate model probabilities
 			model[[event]] <- cv
+		} else {
+			write(paste("Not training", event, "due to insufficient data"), stderr())
 		}
 	}
 	return(model)
@@ -129,7 +131,7 @@ svqsc_annotate <- function(vcfgr, vcfdf) {
 	type <- ifelse(seqnames(vcfgr) != seqnames(p), "XCHR",
 		ifelse(strand(vcfgr) == strand(p), "INV",
 			ifelse((strand(vcfgr) == "+" & start(vcfgr) > start(p)) | (strand(p) == "+" & start(p) > start(vcfgr)), "DUP",
-				ifelse(vcfgr$insLen > vcfgr$svLen / 2, "INS", "DEL"))))
+				ifelse(vcfgr$insLen > abs(vcfgr$svLen) / 2, "INS", "DEL"))))
 	return(type)
 }
 #' Score the given variants according to the trained model
@@ -145,7 +147,7 @@ svqsc_predict <- function(vcfgr, vcfdf, model) {
 			eventmodeldf <- modeldf %>%
 				dplyr::filter(eventType==event) %>%
 				dplyr::select(-eventType, -prediction)
-			pred <- predict(cv, newx=eventmodeldf %>% as.matrix(), type="response", s="lambda.1se")[,1]
+			pred <- predict(cv, newx=model.matrix(~., eventmodeldf), type="response", s="lambda.1se")[,1]
 			modeldf[modeldf$eventType==event,]$prediction <- pred
 		}
 	}
@@ -174,5 +176,14 @@ svqsc_predict <- function(vcfgr, vcfdf, model) {
 			)))
 	}
 	return(rocdf)
+}
+.precRecallAUC <- function(rocdf) {
+	return(rocdf %>%
+		# recall of 1 is the maximum recall of the caller,
+		# not a recall of all events
+		dplyr::mutate(recall=tp/max(tp)) %>%
+		dplyr::mutate(areaToNext=(lead(recall) - recall)*(lead(precision) + precision) / 2) %>%
+		dplyr::summarise(auc=sum(ifelse(is.na(areaToNext), 0, areaToNext)))
+		)$auc
 }
 

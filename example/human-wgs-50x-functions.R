@@ -89,15 +89,80 @@ memoized.load.filtered.bedpe <- addMemoization(load.filtered.bedpe)
 memoized.load.bed <- addMemoization(load.bed)
 memoized.load.svcalls <- addMemoization(load.svcalls)
 
-generate.plots <- function(outputdir, testdfgr, model, truthgr, requiredSupportingReads, maxgap, ignore.strand, sizemargin, countOnlyBest, allowsPartialHits) {
-	plots <- svqsc_generate_plots(testdfgr$vcfgr, testdfgr$vcfdf, model, truthgr, requiredSupportingReads=requiredSupportingReads, maxgap=maxgap, ignore.strand=ignore.strand, sizemargin=sizemargin, countOnlyBest=countOnlyBest, allowsPartialHits=allowsPartialHits)
-	for (event in names(model)) {
-		if (event %in% .eventTypes) {
-			prefix <- paste0(outputdir, "/", testdfgr$sample, "-", testdfgr$caller, "-", event, "-")
-			ggsave(plot=plots[[event]]$pairs, filename=paste0(prefix, "pairs.png"), units="cm", height=29.7-2, width=21-2)
-			ggsave(plot=plots[[event]]$precision_recall, paste0(prefix, "precision_recall-", model$name,".png"), units="cm", height=29.7-2, width=21-2)
+generate.plots <- function(outputdir, testdfgr, models, truthgr, requiredSupportingReads, maxgap, ignore.strand, sizemargin, countOnlyBest, allowsPartialHits) {
+	prefix <- paste0(outputdir, "/", testdfgr$sample, "-", testdfgr$caller, "-")
+	evalmodellist <- lapply(models, function(model) {
+		result <- svqsc_evaluate_model(testdfgr$vcfgr, testdfgr$vcfdf, model, truthgr, requiredSupportingReads=requiredSupportingReads, maxgap=maxgap, ignore.strand=ignore.strand, sizemargin=sizemargin, countOnlyBest=countOnlyBest, allowsPartialHits=allowsPartialHits)
+	})
+	# plot ROC curves
+	dfprecrecall <- bind_rows(lapply(evalmodellist, function(em) {
+		bind_rows(lapply(.eventTypes, function(et) {
+			df <- em[[et]]$precision_recall
+			if (!is.null(df) && nrow(df) > 0) {
+				df$eventType <- et
+				df$modelName <- em$model$name
+				return(df)
+			}
+			return(NULL)
+		}))
+	}))
+	ggplot(dfprecrecall) + aes(x=tp, y=precision, colour=modelName) +
+		geom_line() +
+		facet_wrap(~ eventType)
+		labs(x="True positives", y="Precision", colour="Model")
+	ggsave(file=paste0(prefix, "precision_recall.png"), units="cm", height=10, width=21-2)
+	# AUC
+	dfprecrecallauc <- bind_rows(lapply(evalmodellist, function(em) {
+		bind_rows(lapply(.eventTypes, function(et) {
+			auc <- em[[et]]$precision_recall_auc
+			if (!is.null(auc)) {
+				return(data.frame(
+					caller=caller,
+					eventType=et,
+					modelName=em$model$name,
+					precision_recall_auc=auc,
+				  stringsAsFactors=FALSE))
+			}
+			return(NULL)
+		}))
+	}))
+	write.table(dfprecrecallauc, file=paste0(prefix, "precision_recall_auc.tsv"))
+
+	# Calculate Brier score
+	dfpred <- bind_rows(lapply(evalmodellist, function(em) {
+		sample <- testdfgr$sample
+		caller <- testdfgr$caller
+		return (em$modeldf %>%
+			dplyr::mutate(sample=sample, caller=caller, caller_prediction=10**(-QUAL/10), modelName=em$model$name) %>%
+			dplyr::select(sample, caller, eventType, modelName, tp, prediction, caller_prediction))
+		}))
+	write.table(dfpred, file=paste0(prefix, "predictions.tsv"))
+
+	for (result in evalmodellist) {
+		model <- result$model
+		for (event in names(result)) {
+			if (event %in% .eventTypes) {
+				tryCatch({
+					eventmodeldf <- result$modeldf %>%
+					  dplyr::filter(eventType==event) %>%
+					  dplyr::select(-eventType, -prediction)
+					if (nrow(eventmodeldf) > 0) {
+  					pairsplot <- ggpairs(eventmodeldf %>% mutate(tp=ifelse(tp, "TP", "FP")),
+  						#columns=1:length(eventmodeldf-2),
+  						mapping=ggplot2::aes(colour=tp, alpha=0.2))
+  					ggsave(plot=pairsplot, filename=paste0(prefix, event, "-", model$name, "-pairs.png"), units="cm", height=29.7-2, width=21-2)
+					}
+				})
+			}
 		}
 	}
 }
 
+#' Fills in NAs from the values from the partner breakend
+fill.na.from <- function(df, partnerId) {
+	for (col in names(df)) {
+		df[is.na(df[[col]]),][[col]] <- df[df[is.na(df[[col]]),][[partnerId]],][[col]]
+	}
+	return(df)
+}
 

@@ -1,4 +1,5 @@
 source("human-wgs-50x-functions.R", chdir=TRUE)
+source("../R/svqsc.R")
 
 datadir <- "C:/dev/svqsc.data/"
 
